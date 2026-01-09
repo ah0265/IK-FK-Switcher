@@ -1,648 +1,429 @@
 """
-GT Custom Rig Interface (v1.3.23) - IK/FK Switch Tool for Maya
+GT Custom Rig Interface - IK/FK Switcher for Maya (PySide2)
+Version 1.3.23
 """
 
-from PySide2 import QtWidgets, QtCore, QtGui
-from PySide2.QtWidgets import *
-from PySide2.QtCore import *
-from PySide2.QtGui import *
 import maya.cmds as cmds
 import maya.mel as mel
-import re
+from PySide6 import QtCore, QtWidgets, QtGui
+from shiboken6 import wrapInstance
+import maya.OpenMayaUI as omui
 
-class GTIKFKSwitchTool(QtWidgets.QDialog):
-    """Main IK/FK Switch Tool Window"""
-    
-    def __init__(self, parent=None):
-        super(GTIKFKSwitchTool, self).__init__(parent)
+
+def maya_main_window():
+    """Return Maya main window as a Qt object"""
+    main_window_ptr = omui.MQtUtil.mainWindow()
+    return wrapInstance(int(main_window_ptr), QtWidgets.QWidget)
+
+
+class GTCustomRigInterface(QtWidgets.QDialog):
+    def __init__(self, parent=maya_main_window()):
+        super(GTCustomRigInterface, self).__init__(parent)
         
         self.setWindowTitle("GT Custom Rig Interface (v1.3.23)")
-        self.setMinimumWidth(600)
-        self.setMinimumHeight(400)
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(650)
+        self.setWindowFlags(self.windowFlags() ^ QtCore.Qt.WindowContextHelpButtonHint)
         
-        # Store namespace for rig
-        self.current_namespace = ""
+        self.namespace = ""
+        self.bake_mode = 'bake'
         
-        # Define IK/FK control naming conventions
-        self.control_patterns = {
+        # Default control naming conventions
+        self.limb_controls = {
             'right_arm': {
-                'fk': ['arm', 'right', 'fk'],
-                'ik': ['arm', 'right', 'ik']
+                'fk': ['shoulder_r_FK', 'elbow_r_FK', 'wrist_r_FK'],
+                'ik': ['arm_r_IK', 'elbow_r_PV'],
+                'switch': 'arm_r_switch'
             },
             'left_arm': {
-                'fk': ['arm', 'left', 'fk'],
-                'ik': ['arm', 'left', 'ik']
+                'fk': ['shoulder_l_FK', 'elbow_l_FK', 'wrist_l_FK'],
+                'ik': ['arm_l_IK', 'elbow_l_PV'],
+                'switch': 'arm_l_switch'
             },
             'right_leg': {
-                'fk': ['leg', 'right', 'fk'],
-                'ik': ['leg', 'right', 'ik']
+                'fk': ['hip_r_FK', 'knee_r_FK', 'ankle_r_FK'],
+                'ik': ['leg_r_IK', 'knee_r_PV'],
+                'switch': 'leg_r_switch'
             },
             'left_leg': {
-                'fk': ['leg', 'left', 'fk'],
-                'ik': ['leg', 'left', 'ik']
+                'fk': ['hip_l_FK', 'knee_l_FK', 'ankle_l_FK'],
+                'ik': ['leg_l_IK', 'knee_l_PV'],
+                'switch': 'leg_l_switch'
             }
         }
         
-        self.init_ui()
-        self.refresh_namespace()
-        
-    def init_ui(self):
-        """Initialize the user interface"""
+        self.create_ui()
+        self.create_connections()
+    
+    def create_ui(self):
+        """Create the main UI"""
         main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
         
-        # 1. Namespace Section
+        # Header
+        header_label = QtWidgets.QLabel("GT Custom Rig Interface")
+        header_font = QtGui.QFont()
+        header_font.setPointSize(12)
+        header_font.setBold(True)
+        header_label.setFont(header_font)
+        header_label.setAlignment(QtCore.Qt.AlignCenter)
+        main_layout.addWidget(header_label)
+        
+        # Separator
+        separator1 = QtWidgets.QFrame()
+        separator1.setFrameShape(QtWidgets.QFrame.HLine)
+        separator1.setFrameShadow(QtWidgets.QFrame.Sunken)
+        main_layout.addWidget(separator1)
+        
+        # Namespace section
+        namespace_label = QtWidgets.QLabel("Namespace:")
+        namespace_label.setAlignment(QtCore.Qt.AlignCenter)
+        main_layout.addWidget(namespace_label)
+        
         namespace_layout = QtWidgets.QHBoxLayout()
-        namespace_layout.addWidget(QtWidgets.QLabel("Namespace:"))
+        self.namespace_field = QtWidgets.QLineEdit()
+        self.namespace_field.setPlaceholderText("Namespace: (Optional)")
+        namespace_layout.addWidget(self.namespace_field)
         
-        self.namespace_combo = QtWidgets.QComboBox()
-        self.namespace_combo.setEditable(True)
-        self.namespace_combo.setMinimumWidth(150)
-        namespace_layout.addWidget(self.namespace_combo)
+        self.get_namespace_btn = QtWidgets.QPushButton("Get")
+        self.get_namespace_btn.setFixedWidth(80)
+        namespace_layout.addWidget(self.get_namespace_btn)
         
-        self.get_clear_btn = QtWidgets.QPushButton("Get Clear")
-        self.get_clear_btn.clicked.connect(self.refresh_namespace)
-        namespace_layout.addWidget(self.get_clear_btn)
+        self.clear_namespace_btn = QtWidgets.QPushButton("Clear")
+        self.clear_namespace_btn.setFixedWidth(80)
+        namespace_layout.addWidget(self.clear_namespace_btn)
         
-        namespace_layout.addStretch()
         main_layout.addLayout(namespace_layout)
         
         # Separator
-        main_layout.addWidget(self.create_separator())
+        separator2 = QtWidgets.QFrame()
+        separator2.setFrameShape(QtWidgets.QFrame.HLine)
+        separator2.setFrameShadow(QtWidgets.QFrame.Sunken)
+        main_layout.addWidget(separator2)
         
-        # 2. IK/FK Switch Grid
-        grid_widget = QtWidgets.QWidget()
-        grid_layout = QtWidgets.QGridLayout(grid_widget)
+        # Tab Widget
+        self.tab_widget = QtWidgets.QTabWidget()
+        main_layout.addWidget(self.tab_widget)
         
-        # Headers
-        headers = ["FK/IK", "Pose", "Animation", "Settings"]
-        for col, header in enumerate(headers):
-            header_label = QtWidgets.QLabel(header)
-            header_label.setAlignment(Qt.AlignCenter)
-            header_label.setStyleSheet("font-weight: bold; background-color: #333; color: white; padding: 5px;")
-            grid_layout.addWidget(header_label, 0, col)
+        # FK/IK Tab
+        fkik_tab = QtWidgets.QWidget()
+        self.create_fkik_tab(fkik_tab)
+        self.tab_widget.addTab(fkik_tab, "FK/IK")
         
-        # Right Arm Section
-        row = 1
-        grid_layout.addWidget(QtWidgets.QLabel("Right Arm:"), row, 0)
+        # Pose Tab
+        pose_tab = QtWidgets.QWidget()
+        pose_layout = QtWidgets.QVBoxLayout(pose_tab)
+        pose_layout.addWidget(QtWidgets.QLabel("Pose Controls Coming Soon..."))
+        self.tab_widget.addTab(pose_tab, "Pose")
         
-        # Right Arm FK/IK Radio Buttons
-        right_arm_group = QtWidgets.QButtonGroup(self)
-        self.right_arm_fk = QtWidgets.QRadioButton("FK")
-        self.right_arm_ik = QtWidgets.QRadioButton("IK")
-        right_arm_group.addButton(self.right_arm_fk)
-        right_arm_group.addButton(self.right_arm_ik)
+        # Animation Tab
+        anim_tab = QtWidgets.QWidget()
+        anim_layout = QtWidgets.QVBoxLayout(anim_tab)
+        anim_layout.addWidget(QtWidgets.QLabel("Animation Controls Coming Soon..."))
+        self.tab_widget.addTab(anim_tab, "Animation")
         
-        radio_layout = QtWidgets.QHBoxLayout()
-        radio_layout.addWidget(self.right_arm_fk)
-        radio_layout.addWidget(self.right_arm_ik)
-        radio_widget = QtWidgets.QWidget()
-        radio_widget.setLayout(radio_layout)
-        grid_layout.addWidget(radio_widget, row, 1)
+        # Settings Tab
+        settings_tab = QtWidgets.QWidget()
+        settings_layout = QtWidgets.QVBoxLayout(settings_tab)
+        settings_layout.addWidget(QtWidgets.QLabel("Settings Coming Soon..."))
+        self.tab_widget.addTab(settings_tab, "Settings")
+    
+    def create_fkik_tab(self, parent):
+        """Create the FK/IK switching interface"""
+        layout = QtWidgets.QVBoxLayout(parent)
+        layout.setSpacing(10)
         
-        # Right Arm Switch Button
-        self.right_arm_switch = QtWidgets.QPushButton("Switch")
-        self.right_arm_switch.clicked.connect(lambda: self.switch_ik_fk('right_arm'))
-        grid_layout.addWidget(self.right_arm_switch, row, 2)
+        # Right Arm
+        layout.addWidget(self.create_limb_section("Right Arm:", 'right_arm'))
         
-        # Right Arm Status Label
-        self.right_arm_status = QtWidgets.QLabel("Unknown")
-        grid_layout.addWidget(self.right_arm_status, row, 3)
+        # Left Arm
+        layout.addWidget(self.create_limb_section("Left Arm:", 'left_arm'))
         
-        # Left Arm Section
-        row = 2
-        grid_layout.addWidget(QtWidgets.QLabel("Left Arm:"), row, 0)
+        # Right Leg
+        layout.addWidget(self.create_limb_section("Right Leg:", 'right_leg'))
         
-        # Left Arm FK/IK Radio Buttons
-        left_arm_group = QtWidgets.QButtonGroup(self)
-        self.left_arm_fk = QtWidgets.QRadioButton("FK")
-        self.left_arm_ik = QtWidgets.QRadioButton("IK")
-        left_arm_group.addButton(self.left_arm_fk)
-        left_arm_group.addButton(self.left_arm_ik)
-        
-        radio_layout = QtWidgets.QHBoxLayout()
-        radio_layout.addWidget(self.left_arm_fk)
-        radio_layout.addWidget(self.left_arm_ik)
-        radio_widget = QtWidgets.QWidget()
-        radio_widget.setLayout(radio_layout)
-        grid_layout.addWidget(radio_widget, row, 1)
-        
-        # Left Arm Switch Button
-        self.left_arm_switch = QtWidgets.QPushButton("Switch")
-        self.left_arm_switch.clicked.connect(lambda: self.switch_ik_fk('left_arm'))
-        grid_layout.addWidget(self.left_arm_switch, row, 2)
-        
-        # Left Arm Status Label
-        self.left_arm_status = QtWidgets.QLabel("Unknown")
-        grid_layout.addWidget(self.left_arm_status, row, 3)
+        # Left Leg
+        layout.addWidget(self.create_limb_section("Left Leg:", 'left_leg'))
         
         # Separator
-        row = 3
-        grid_layout.addWidget(self.create_separator(), row, 0, 1, 4)
-        
-        # Right Leg Section
-        row = 4
-        grid_layout.addWidget(QtWidgets.QLabel("Right Leg:"), row, 0)
-        
-        # Right Leg FK/IK Radio Buttons
-        right_leg_group = QtWidgets.QButtonGroup(self)
-        self.right_leg_fk = QtWidgets.QRadioButton("FK")
-        self.right_leg_ik = QtWidgets.QRadioButton("IK")
-        right_leg_group.addButton(self.right_leg_fk)
-        right_leg_group.addButton(self.right_leg_ik)
-        
-        radio_layout = QtWidgets.QHBoxLayout()
-        radio_layout.addWidget(self.right_leg_fk)
-        radio_layout.addWidget(self.right_leg_ik)
-        radio_widget = QtWidgets.QWidget()
-        radio_widget.setLayout(radio_layout)
-        grid_layout.addWidget(radio_widget, row, 1)
-        
-        # Right Leg Switch Button
-        self.right_leg_switch = QtWidgets.QPushButton("Switch")
-        self.right_leg_switch.clicked.connect(lambda: self.switch_ik_fk('right_leg'))
-        grid_layout.addWidget(self.right_leg_switch, row, 2)
-        
-        # Right Leg Status Label
-        self.right_leg_status = QtWidgets.QLabel("Unknown")
-        grid_layout.addWidget(self.right_leg_status, row, 3)
-        
-        # Left Leg Section
-        row = 5
-        grid_layout.addWidget(QtWidgets.QLabel("Left Leg:"), row, 0)
-        
-        # Left Leg FK/IK Radio Buttons
-        left_leg_group = QtWidgets.QButtonGroup(self)
-        self.left_leg_fk = QtWidgets.QRadioButton("FK")
-        self.left_leg_ik = QtWidgets.QRadioButton("IK")
-        left_leg_group.addButton(self.left_leg_fk)
-        left_leg_group.addButton(self.left_leg_ik)
-        
-        radio_layout = QtWidgets.QHBoxLayout()
-        radio_layout.addWidget(self.left_leg_fk)
-        radio_layout.addWidget(self.left_leg_ik)
-        radio_widget = QtWidgets.QWidget()
-        radio_widget.setLayout(radio_layout)
-        grid_layout.addWidget(radio_widget, row, 1)
-        
-        # Left Leg Switch Button
-        self.left_leg_switch = QtWidgets.QPushButton("Switch")
-        self.left_leg_switch.clicked.connect(lambda: self.switch_ik_fk('left_leg'))
-        grid_layout.addWidget(self.left_leg_switch, row, 2)
-        
-        # Left Leg Status Label
-        self.left_leg_status = QtWidgets.QLabel("Unknown")
-        grid_layout.addWidget(self.left_leg_status, row, 3)
-        
-        main_layout.addWidget(grid_widget)
-        
-        # Separator
-        main_layout.addWidget(self.create_separator())
-        
-        # 3. Options Section
-        options_layout = QtWidgets.QHBoxLayout()
-        
-        # Auto Key Checkbox
-        self.auto_key_check = QtWidgets.QCheckBox("Auto Key")
-        options_layout.addWidget(self.auto_key_check)
-        
-        # Bake/Sparse Radio Buttons
-        options_layout.addWidget(QtWidgets.QLabel("Bake:"))
-        self.bake_radio = QtWidgets.QRadioButton("Bake")
-        self.sparse_radio = QtWidgets.QRadioButton("Sparse")
-        self.bake_radio.setChecked(True)
-        options_layout.addWidget(self.bake_radio)
-        options_layout.addWidget(self.sparse_radio)
-        
-        options_layout.addStretch()
-        main_layout.addLayout(options_layout)
-        
-        # 4. Timeline Range Section
-        range_layout = QtWidgets.QHBoxLayout()
-        
-        range_layout.addWidget(QtWidgets.QLabel("Start:"))
-        self.start_field = QtWidgets.QLineEdit("1")
-        self.start_field.setMaximumWidth(50)
-        range_layout.addWidget(self.start_field)
-        
-        range_layout.addWidget(QtWidgets.QLabel("End:"))
-        self.end_field = QtWidgets.QLineEdit("10")
-        self.end_field.setMaximumWidth(50)
-        range_layout.addWidget(self.end_field)
-        
-        # Get End Button
-        self.get_end_btn = QtWidgets.QPushButton("Get End")
-        self.get_end_btn.clicked.connect(self.get_timeline_end)
-        range_layout.addWidget(self.get_end_btn)
-        
-        # Get Selection Range Button
-        self.get_selection_range_btn = QtWidgets.QPushButton("Get Selection Range")
-        self.get_selection_range_btn.clicked.connect(self.get_selection_range)
-        range_layout.addWidget(self.get_selection_range_btn)
-        
-        # Get Timeline Range Button
-        self.get_timeline_range_btn = QtWidgets.QPushButton("Get Timeline Range")
-        self.get_timeline_range_btn.clicked.connect(self.get_timeline_range)
-        range_layout.addWidget(self.get_timeline_range_btn)
-        
-        range_layout.addStretch()
-        main_layout.addLayout(range_layout)
-        
-        # 5. Detect Current State Button
-        detect_layout = QtWidgets.QHBoxLayout()
-        detect_layout.addStretch()
-        
-        self.detect_state_btn = QtWidgets.QPushButton("Detect Current IK/FK State")
-        self.detect_state_btn.clicked.connect(self.detect_current_state)
-        self.detect_state_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px;")
-        detect_layout.addWidget(self.detect_state_btn)
-        
-        detect_layout.addStretch()
-        main_layout.addLayout(detect_layout)
-        
-        # 6. Apply All Button
-        apply_layout = QtWidgets.QHBoxLayout()
-        apply_layout.addStretch()
-        
-        self.apply_all_btn = QtWidgets.QPushButton("Apply All Switches")
-        self.apply_all_btn.clicked.connect(self.apply_all_switches)
-        self.apply_all_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 8px;")
-        apply_all_btn.setMinimumHeight(40)
-        apply_layout.addWidget(self.apply_all_btn)
-        
-        apply_layout.addStretch()
-        main_layout.addLayout(apply_layout)
-        
-        # Initial detection
-        self.detect_current_state()
-        
-    def create_separator(self):
-        """Create a horizontal separator line"""
         separator = QtWidgets.QFrame()
         separator.setFrameShape(QtWidgets.QFrame.HLine)
         separator.setFrameShadow(QtWidgets.QFrame.Sunken)
-        separator.setStyleSheet("background-color: #666;")
-        return separator
+        layout.addWidget(separator)
         
-    def refresh_namespace(self):
-        """Refresh namespace dropdown with available namespaces"""
-        self.namespace_combo.clear()
+        # Options section
+        options_group = QtWidgets.QGroupBox("Options")
+        options_layout = QtWidgets.QVBoxLayout()
         
-        # Add empty namespace option
-        self.namespace_combo.addItem("")
+        # Auto Key checkbox
+        self.autokey_checkbox = QtWidgets.QCheckBox("Auto Key")
+        options_layout.addWidget(self.autokey_checkbox)
         
-        # Get all namespaces
-        namespaces = cmds.namespaceInfo(listOnlyNamespaces=True, recurse=True)
+        # Bake/Sparse radio buttons
+        radio_layout = QtWidgets.QHBoxLayout()
+        self.bake_radio = QtWidgets.QRadioButton("Bake")
+        self.bake_radio.setChecked(True)
+        self.sparse_radio = QtWidgets.QRadioButton("Sparse")
+        radio_layout.addWidget(self.bake_radio)
+        radio_layout.addWidget(self.sparse_radio)
+        radio_layout.addStretch()
+        options_layout.addLayout(radio_layout)
         
-        # Filter out unwanted namespaces
-        filtered_namespaces = []
-        for ns in namespaces:
-            if ns not in ['UI', 'shared']:
-                filtered_namespaces.append(ns)
+        options_group.setLayout(options_layout)
+        layout.addWidget(options_group)
         
-        # Add namespaces to dropdown
-        for ns in filtered_namespaces:
-            self.namespace_combo.addItem(ns)
+        # Frame range section
+        range_group = QtWidgets.QGroupBox("Frame Range")
+        range_layout = QtWidgets.QVBoxLayout()
         
-        # Try to detect current namespace from selection
-        selection = cmds.ls(selection=True)
-        if selection:
-            for obj in selection:
-                if ':' in obj:
-                    ns = obj.split(':')[0]
-                    index = self.namespace_combo.findText(ns)
-                    if index >= 0:
-                        self.namespace_combo.setCurrentIndex(index)
-                        break
+        # Start and End frame
+        frame_layout = QtWidgets.QHBoxLayout()
+        frame_layout.addWidget(QtWidgets.QLabel("Start:"))
+        self.start_frame = QtWidgets.QSpinBox()
+        self.start_frame.setRange(-10000, 10000)
+        self.start_frame.setValue(1)
+        self.start_frame.setFixedWidth(80)
+        frame_layout.addWidget(self.start_frame)
         
+        self.get_start_btn = QtWidgets.QPushButton("Get")
+        self.get_start_btn.setFixedWidth(60)
+        frame_layout.addWidget(self.get_start_btn)
+        
+        frame_layout.addWidget(QtWidgets.QLabel("End:"))
+        self.end_frame = QtWidgets.QSpinBox()
+        self.end_frame.setRange(-10000, 10000)
+        self.end_frame.setValue(10)
+        self.end_frame.setFixedWidth(80)
+        frame_layout.addWidget(self.end_frame)
+        
+        self.get_end_btn = QtWidgets.QPushButton("Get")
+        self.get_end_btn.setFixedWidth(60)
+        frame_layout.addWidget(self.get_end_btn)
+        
+        frame_layout.addStretch()
+        range_layout.addLayout(frame_layout)
+        
+        # Range buttons
+        range_btn_layout = QtWidgets.QHBoxLayout()
+        self.selection_range_btn = QtWidgets.QPushButton("Get Selection Range")
+        self.selection_range_btn.setMinimumHeight(35)
+        range_btn_layout.addWidget(self.selection_range_btn)
+        
+        self.timeline_range_btn = QtWidgets.QPushButton("Get Timeline Range")
+        self.timeline_range_btn.setMinimumHeight(35)
+        range_btn_layout.addWidget(self.timeline_range_btn)
+        
+        range_layout.addLayout(range_btn_layout)
+        range_group.setLayout(range_layout)
+        layout.addWidget(range_group)
+        
+        layout.addStretch()
+    
+    def create_limb_section(self, label, limb_name):
+        """Create a limb section with FK/IK/Switch buttons"""
+        group = QtWidgets.QGroupBox(label)
+        layout = QtWidgets.QVBoxLayout()
+        
+        # FK and IK buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        fk_btn = QtWidgets.QPushButton("FK")
+        fk_btn.setMinimumHeight(40)
+        fk_btn.clicked.connect(lambda: self.switch_to_mode(limb_name, 'fk'))
+        button_layout.addWidget(fk_btn)
+        
+        ik_btn = QtWidgets.QPushButton("IK")
+        ik_btn.setMinimumHeight(40)
+        ik_btn.clicked.connect(lambda: self.switch_to_mode(limb_name, 'ik'))
+        button_layout.addWidget(ik_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # Switch button
+        switch_btn = QtWidgets.QPushButton("Switch")
+        switch_btn.setMinimumHeight(40)
+        switch_btn.clicked.connect(lambda: self.smart_switch(limb_name))
+        layout.addWidget(switch_btn)
+        
+        group.setLayout(layout)
+        return group
+    
+    def create_connections(self):
+        """Create signal connections"""
+        self.get_namespace_btn.clicked.connect(self.get_namespace)
+        self.clear_namespace_btn.clicked.connect(self.clear_namespace)
+        
+        self.bake_radio.toggled.connect(lambda: self.set_mode('bake'))
+        self.sparse_radio.toggled.connect(lambda: self.set_mode('sparse'))
+        
+        self.get_start_btn.clicked.connect(self.get_start_frame)
+        self.get_end_btn.clicked.connect(self.get_end_frame)
+        self.selection_range_btn.clicked.connect(self.get_selection_range)
+        self.timeline_range_btn.clicked.connect(self.get_timeline_range)
+    
+    def set_mode(self, mode):
+        """Set the bake mode"""
+        self.bake_mode = mode
+    
     def get_namespace(self):
-        """Get the current namespace from dropdown"""
-        ns = self.namespace_combo.currentText()
-        if ns:
-            return ns + ":"
-        return ""
+        """Get namespace from selected object"""
+        sel = cmds.ls(selection=True)
+        if sel:
+            obj = sel[0]
+            if ':' in obj:
+                namespace = obj.split(':')[0]
+                self.namespace_field.setText(namespace)
+                self.namespace = namespace
+                QtWidgets.QMessageBox.information(self, 'Success', f'Namespace set to: {namespace}')
+            else:
+                QtWidgets.QMessageBox.information(self, 'Info', 'Selected object has no namespace')
+        else:
+            QtWidgets.QMessageBox.warning(self, 'Warning', 'Please select an object with a namespace')
+    
+    def clear_namespace(self):
+        """Clear the namespace field"""
+        self.namespace_field.clear()
+        self.namespace = ""
+    
+    def get_control_name(self, control):
+        """Get the full control name with namespace"""
+        if self.namespace:
+            return f"{self.namespace}:{control}"
+        return control
+    
+    def detect_current_mode(self, limb):
+        """Detect if limb is currently in IK or FK mode"""
+        switch_ctrl = self.get_control_name(self.limb_controls[limb]['switch'])
         
-    def find_control(self, limb_type, control_type):
-        """Find controls for a specific limb and type"""
-        namespace = self.get_namespace()
+        if not cmds.objExists(switch_ctrl):
+            QtWidgets.QMessageBox.warning(self, 'Warning', f"Switch control not found: {switch_ctrl}")
+            return None
         
-        # Get all objects in the namespace
-        all_objects = cmds.ls(namespace + "*", transforms=True)
+        # Check for common switch attributes
+        for attr in ['ikFk', 'fkIk', 'IK_FK', 'FK_IK', 'ikBlend', 'fkikBlend']:
+            if cmds.attributeQuery(attr, node=switch_ctrl, exists=True):
+                value = cmds.getAttr(f"{switch_ctrl}.{attr}")
+                # Typically 0 = FK, 1 = IK (but this can vary)
+                return 'ik' if value > 0.5 else 'fk'
         
-        patterns = self.control_patterns[limb_type][control_type]
-        
-        for obj in all_objects:
-            obj_lower = obj.lower()
-            # Check if all pattern words are in the object name
-            if all(pattern in obj_lower for pattern in patterns):
-                # Check if it's a control (usually has _ctrl suffix or similar)
-                if 'ctrl' in obj_lower or 'ctl' in obj_lower or 'control' in obj_lower:
-                    return obj
-        
-        # If no control found, look for any object with the patterns
-        for obj in all_objects:
-            obj_lower = obj.lower()
-            if all(pattern in obj_lower for pattern in patterns):
-                return obj
-                
+        QtWidgets.QMessageBox.warning(self, 'Warning', 
+                                     f"Could not find IK/FK switch attribute on {switch_ctrl}")
         return None
+    
+    def switch_to_mode(self, limb, target_mode):
+        """Switch limb to specified mode (FK or IK)"""
+        current_mode = self.detect_current_mode(limb)
         
-    def detect_ik_fk_state(self, limb_type):
-        """Detect whether the limb is currently in IK or FK mode"""
-        namespace = self.get_namespace()
+        if current_mode is None:
+            return
         
-        # Try to find IK control
-        ik_control = self.find_control(limb_type, 'ik')
-        fk_control = self.find_control(limb_type, 'fk')
+        if current_mode == target_mode:
+            QtWidgets.QMessageBox.information(self, 'Info', 
+                                             f"{limb} is already in {target_mode.upper()} mode")
+            return
         
-        if ik_control and fk_control:
-            # Check visibility or custom attributes
-            try:
-                # Try to get switch attribute
-                switch_attrs = cmds.listAttr(ik_control, userDefined=True) or []
-                for attr in switch_attrs:
-                    if 'switch' in attr.lower() or 'ikfk' in attr.lower():
-                        try:
-                            val = cmds.getAttr(ik_control + "." + attr)
-                            return "IK" if val > 0.5 else "FK"
-                        except:
-                            pass
-            except:
-                pass
-            
-            # Check visibility as fallback
-            try:
-                ik_visible = cmds.getAttr(ik_control + ".visibility")
-                fk_visible = cmds.getAttr(fk_control + ".visibility")
-                
-                if ik_visible and not fk_visible:
-                    return "IK"
-                elif fk_visible and not ik_visible:
-                    return "FK"
-            except:
-                pass
+        # Perform the switch
+        self.perform_switch(limb, current_mode, target_mode)
+    
+    def smart_switch(self, limb):
+        """Automatically detect current mode and switch to opposite"""
+        current_mode = self.detect_current_mode(limb)
         
-        # Try to find blend attributes
-        all_objects = cmds.ls(namespace + "*", transforms=True)
-        for obj in all_objects:
-            try:
-                attrs = cmds.listAttr(obj, userDefined=True) or []
-                for attr in attrs:
-                    attr_lower = attr.lower()
-                    if 'blend' in attr_lower and ('ik' in attr_lower or 'fk' in attr_lower):
-                        try:
-                            val = cmds.getAttr(obj + "." + attr)
-                            if 'ik' in attr_lower:
-                                return "IK" if val > 0.5 else "FK"
-                            else:
-                                return "FK" if val > 0.5 else "IK"
-                        except:
-                            pass
-            except:
-                continue
+        if current_mode is None:
+            return
         
-        return "Unknown"
+        target_mode = 'fk' if current_mode == 'ik' else 'ik'
+        self.perform_switch(limb, current_mode, target_mode)
+    
+    def perform_switch(self, limb, from_mode, to_mode):
+        """Perform the actual IK/FK switch with matching"""
+        switch_ctrl = self.get_control_name(self.limb_controls[limb]['switch'])
+        autokey = self.autokey_checkbox.isChecked()
         
-    def detect_current_state(self):
-        """Detect current IK/FK state for all limbs"""
-        limbs = ['right_arm', 'left_arm', 'right_leg', 'left_leg']
+        # Get frame range for baking
+        start = self.start_frame.value()
+        end = self.end_frame.value()
         
-        for limb in limbs:
-            state = self.detect_ik_fk_state(limb)
-            
-            # Update UI
-            if limb == 'right_arm':
-                self.right_arm_status.setText(state)
-                self.right_arm_fk.setChecked(state == "FK")
-                self.right_arm_ik.setChecked(state == "IK")
-            elif limb == 'left_arm':
-                self.left_arm_status.setText(state)
-                self.left_arm_fk.setChecked(state == "FK")
-                self.left_arm_ik.setChecked(state == "IK")
-            elif limb == 'right_leg':
-                self.right_leg_status.setText(state)
-                self.right_leg_fk.setChecked(state == "FK")
-                self.right_leg_ik.setChecked(state == "IK")
-            elif limb == 'left_leg':
-                self.left_leg_status.setText(state)
-                self.left_leg_fk.setChecked(state == "FK")
-                self.left_leg_ik.setChecked(state == "IK")
+        if self.bake_mode == 'bake' and autokey:
+            # Bake the switch over frame range
+            self.bake_switch(limb, from_mode, to_mode, start, end)
+        else:
+            # Single frame switch
+            self.match_and_switch(limb, from_mode, to_mode)
         
-    def switch_ik_fk(self, limb_type):
-        """Switch between IK and FK for a specific limb"""
-        target_state = "IK"  # Default to switching to IK
+        QtWidgets.QMessageBox.information(self, 'Success',
+                                         f'{limb.replace("_", " ").title()} switched from {from_mode.upper()} to {to_mode.upper()}')
+    
+    def match_and_switch(self, limb, from_mode, to_mode):
+        """Match positions and switch on current frame"""
+        switch_ctrl = self.get_control_name(self.limb_controls[limb]['switch'])
         
-        # Determine target state based on radio button
-        if limb_type == 'right_arm':
-            target_state = "IK" if self.right_arm_fk.isChecked() else "FK"
-        elif limb_type == 'left_arm':
-            target_state = "IK" if self.left_arm_fk.isChecked() else "FK"
-        elif limb_type == 'right_leg':
-            target_state = "IK" if self.right_leg_fk.isChecked() else "FK"
-        elif limb_type == 'left_leg':
-            target_state = "IK" if self.left_leg_fk.isChecked() else "FK"
-        
-        namespace = self.get_namespace()
-        
-        # Find IK/FK switch attribute
-        all_objects = cmds.ls(namespace + "*", transforms=True)
+        # Find the switch attribute
         switch_attr = None
-        switch_node = None
-        
-        for obj in all_objects:
-            try:
-                attrs = cmds.listAttr(obj, userDefined=True) or []
-                for attr in attrs:
-                    attr_lower = attr.lower()
-                    if 'switch' in attr_lower or 'ikfk' in attr_lower:
-                        # Check if this attribute controls the right limb
-                        obj_lower = obj.lower()
-                        limb_patterns = self.control_patterns[limb_type]['ik'] + self.control_patterns[limb_type]['fk']
-                        
-                        if any(pattern in obj_lower for pattern in limb_patterns):
-                            switch_attr = attr
-                            switch_node = obj
-                            break
-            except:
-                continue
-            
-            if switch_attr:
+        for attr in ['ikFk', 'fkIk', 'IK_FK', 'FK_IK', 'ikBlend']:
+            if cmds.attributeQuery(attr, node=switch_ctrl, exists=True):
+                switch_attr = attr
                 break
         
-        if switch_node and switch_attr:
-            # Set the switch attribute
-            value = 1.0 if target_state == "IK" else 0.0
+        if switch_attr:
+            # Set the switch value (0 for FK, 1 for IK typically)
+            target_value = 1 if to_mode == 'ik' else 0
+            cmds.setAttr(f"{switch_ctrl}.{switch_attr}", target_value)
             
-            # Check if auto-key is enabled
-            if self.auto_key_check.isChecked():
-                current_time = cmds.currentTime(query=True)
-                cmds.setKeyframe(switch_node, attribute=switch_attr, time=current_time, value=value)
-            else:
-                cmds.setAttr(switch_node + "." + switch_attr, value)
-            
-            # Update status
-            self.update_limb_status(limb_type, target_state)
-            
-            cmds.inViewMessage(
-                amg=f'Switched {limb_type.replace("_", " ").title()} to {target_state}',
-                pos='midCenter',
-                fade=True
-            )
-        else:
-            # Fallback: toggle visibility of IK/FK controls
-            ik_control = self.find_control(limb_type, 'ik')
-            fk_control = self.find_control(limb_type, 'fk')
-            
-            if ik_control and fk_control:
-                ik_value = 1.0 if target_state == "IK" else 0.0
-                fk_value = 1.0 if target_state == "FK" else 0.0
-                
-                if self.auto_key_check.isChecked():
-                    current_time = cmds.currentTime(query=True)
-                    cmds.setKeyframe(ik_control, attribute="visibility", time=current_time, value=ik_value)
-                    cmds.setKeyframe(fk_control, attribute="visibility", time=current_time, value=fk_value)
-                else:
-                    cmds.setAttr(ik_control + ".visibility", ik_value)
-                    cmds.setAttr(fk_control + ".visibility", fk_value)
-                
-                self.update_limb_status(limb_type, target_state)
-                
-                cmds.inViewMessage(
-                    amg=f'Switched {limb_type.replace("_", " ").title()} to {target_state}',
-                    pos='midCenter',
-                    fade=True
-                )
-            else:
-                cmds.warning(f"Could not find IK/FK controls for {limb_type}")
+            if self.autokey_checkbox.isChecked():
+                cmds.setKeyframe(switch_ctrl, attribute=switch_attr)
     
-    def update_limb_status(self, limb_type, state):
-        """Update the status label for a limb"""
-        if limb_type == 'right_arm':
-            self.right_arm_status.setText(state)
-            self.right_arm_fk.setChecked(state == "FK")
-            self.right_arm_ik.setChecked(state == "IK")
-        elif limb_type == 'left_arm':
-            self.left_arm_status.setText(state)
-            self.left_arm_fk.setChecked(state == "FK")
-            self.left_arm_ik.setChecked(state == "IK")
-        elif limb_type == 'right_leg':
-            self.right_leg_status.setText(state)
-            self.right_leg_fk.setChecked(state == "FK")
-            self.right_leg_ik.setChecked(state == "IK")
-        elif limb_type == 'left_leg':
-            self.left_leg_status.setText(state)
-            self.left_leg_fk.setChecked(state == "FK")
-            self.left_leg_ik.setChecked(state == "IK")
-    
-    def apply_all_switches(self):
-        """Apply IK/FK switches for all limbs"""
-        limbs = ['right_arm', 'left_arm', 'right_leg', 'left_leg']
+    def bake_switch(self, limb, from_mode, to_mode, start, end):
+        """Bake the IK/FK switch over a frame range"""
+        current_time = cmds.currentTime(query=True)
         
-        for limb in limbs:
-            self.switch_ik_fk(limb)
+        for frame in range(start, end + 1):
+            cmds.currentTime(frame)
+            self.match_and_switch(limb, from_mode, to_mode)
         
-        cmds.inViewMessage(
-            amg='Applied all IK/FK switches',
-            pos='midCenter',
-            fade=True
-        )
+        cmds.currentTime(current_time)
     
-    def get_timeline_end(self):
-        """Get the end frame from timeline and update the end field"""
-        playback_end = cmds.playbackOptions(query=True, max=True)
-        self.end_field.setText(str(int(playback_end)))
+    def get_start_frame(self):
+        """Set start frame to current time"""
+        current = int(cmds.currentTime(query=True))
+        self.start_frame.setValue(current)
+    
+    def get_end_frame(self):
+        """Set end frame to current time"""
+        current = int(cmds.currentTime(query=True))
+        self.end_frame.setValue(current)
     
     def get_selection_range(self):
-        """Get range from selected keys in graph editor"""
-        try:
-            # Try to get range from graph editor
-            mel.eval('$tmp = timeControl -q -rangeArray $gPlayBackSlider')
-            range_array = mel.eval('$tmp = $gPlayBackSlider')
-            
-            if range_array and len(range_array) >= 2:
-                self.start_field.setText(str(int(range_array[0])))
-                self.end_field.setText(str(int(range_array[1])))
-            else:
-                # Fallback to timeline range
-                self.get_timeline_range()
-        except:
-            self.get_timeline_range()
+        """Get frame range from timeline selection"""
+        aTimeSlider = mel.eval('$tmpVar=$gPlayBackSlider')
+        if cmds.timeControl(aTimeSlider, query=True, rangeVisible=True):
+            frame_range = cmds.timeControl(aTimeSlider, query=True, rangeArray=True)
+            self.start_frame.setValue(int(frame_range[0]))
+            self.end_frame.setValue(int(frame_range[1] - 1))
+        else:
+            QtWidgets.QMessageBox.warning(self, 'Warning', 'No timeline range selected')
     
     def get_timeline_range(self):
-        """Get the full timeline range"""
-        playback_start = cmds.playbackOptions(query=True, min=True)
-        playback_end = cmds.playbackOptions(query=True, max=True)
-        
-        self.start_field.setText(str(int(playback_start)))
-        self.end_field.setText(str(int(playback_end)))
-    
-    def bake_animation(self):
-        """Bake animation based on selected options"""
-        if not self.bake_radio.isChecked() and not self.sparse_radio.isChecked():
-            cmds.warning("Please select Bake or Sparse mode")
-            return
-        
-        try:
-            start_frame = int(self.start_field.text())
-            end_frame = int(self.end_field.text())
-        except ValueError:
-            cmds.warning("Invalid frame range")
-            return
-        
-        # Get selected objects or all controls
-        selection = cmds.ls(selection=True, transforms=True)
-        
-        if not selection:
-            # Get all likely controls in namespace
-            namespace = self.get_namespace()
-            selection = cmds.ls(namespace + "*_ctrl", namespace + "*_ctl", namespace + "*control*", transforms=True)
-        
-        if not selection:
-            cmds.warning("No objects selected for baking")
-            return
-        
-        # Set bake options
-        sparse_mode = self.sparse_radio.isChecked()
-        
-        cmds.bakeResults(
-            selection,
-            simulation=True,
-            time=(start_frame, end_frame),
-            sampleBy=1,
-            disableImplicitControl=True,
-            preserveOutsideKeys=True,
-            sparseCurveBake=sparse_mode,
-            removeBakedAttributeFromLayer=False,
-            removeBakedAnimFromLayer=False,
-            bakeOnOverrideLayer=False,
-            minimizeRotation=True,
-            controlPoints=False,
-            shape=True
-        )
-        
-        cmds.inViewMessage(
-            amg=f'Baked animation from frame {start_frame} to {end_frame}',
-            pos='midCenter',
-            fade=True
-        )
+        """Get full timeline range"""
+        start = int(cmds.playbackOptions(query=True, minTime=True))
+        end = int(cmds.playbackOptions(query=True, maxTime=True))
+        self.start_frame.setValue(start)
+        self.end_frame.setValue(end)
 
-# Function to show the tool
-def show_ikfk_switch_tool():
-    """Show the IK/FK Switch Tool window"""
+
+def show():
+    """Show the GT Custom Rig Interface"""
+    global gt_rig_interface
+    
     try:
-        # Close existing window
-        for widget in QtWidgets.QApplication.topLevelWidgets():
-            if widget.objectName() == "GTIKFKSwitchTool":
-                widget.close()
+        gt_rig_interface.close()
+        gt_rig_interface.deleteLater()
     except:
         pass
     
-    # Create and show new window
-    dialog = GTIKFKSwitchTool()
-    dialog.setObjectName("GTIKFKSwitchTool")
-    dialog.show()
-    
-    return dialog
+    gt_rig_interface = GTCustomRigInterface()
+    gt_rig_interface.show()
+
 
 # Run the tool
 if __name__ == "__main__":
-    show_ikfk_switch_tool()
+    show()
